@@ -469,29 +469,23 @@ impl<
     pub fn open_read(&mut self, filename: &str) -> anyhow::Result<usize, FileSystemError> {
         let (inode_num, inode) = self.inode_for(filename)?;
 
-        // * If the `open_inodes` table is already `true`, return AlreadyOpen.
+      
         if self.open_inodes[inode_num] {
             return Err(FileSystemError::AlreadyOpen);
         }
     
-        // Call `find_lowest_fd()` to pick a file descriptor.
-        let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen);
+
+        let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
+
+        let mut file_info = FileInfo::read(inode, inode_num);
     
-        // * If none are available, return TooManyOpen. (Handled by ok_or above)
-    
-        // Call FileInfo::read() to create a FileInfo object for the open file table.
-        let mut file_info = FileInfo::read(inode);
-    
-        // Read the first block from disk into the FileInfo object's block buffer.
         if inode.blocks[0] != 0 {
             self.disk.read(inode.blocks[0] as usize, &mut file_info.block_buffer);
         }
     
-        // Update entries in `open` and `open_inodes`.
-        self.open[fd] = file_info;
+        self.open[fd] = Some(file_info);
         self.open_inodes[inode_num] = true;
     
-        // Return the file descriptor.
         Ok(fd)
 
         // Call `inode_for()` to get the file's inode.
