@@ -542,57 +542,84 @@ impl<
         filename: &str,
         inode_num: usize,
         directory_inode: &mut Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>,
-    ) -> anyhow::Result<(), FileSystemError> {
+    ) -> Result<(), FileSystemError> {
         self.load_directory()?;
 
-        let dir_content_buffer = &mut self.file_content_buffer;
-        let file_entry_size = MAX_FILENAME_BYTES + std::mem::size_of::<usize>();
-        let mut current_offset = 0;
+        let entry_size = MAX_FILENAME_BYTES + 4;
+        let buf = &mut self.file_content_buffer;
     
-        for i in 0..MAX_FILES_STORED {
-            let entry_start = i * file_entry_size;
-            let entry_end = entry_start + MAX_FILENAME_BYTES;
-    
-            if dir_content_buffer[entry_start..entry_end].iter().all(|&byte| byte == 0) {
-                current_offset = entry_start;
+        let mut offset = 0;
+        let mut found = false;
+        let mut i = 0;
+        while i < MAX_FILES_STORED {
+            let start = i * entry_size;
+            let mut empty = true;
+            let mut j = 0;
+            while j < MAX_FILENAME_BYTES {
+                if buf[start + j] != 0 {
+                    empty = false;
+                    break;
+                }
+                j += 1;
+            }
+            if empty {
+                offset = start;
+                found = true;
                 break;
             }
-        }
-
-        for (i, &byte) in filename.as_bytes().iter().take(MAX_FILENAME_BYTES).enumerate() {
-            dir_content_buffer[current_offset + i] = byte;
+            i += 1;
         }
     
-        for i in filename.len()..MAX_FILENAME_BYTES {
-            dir_content_buffer[current_offset + i] = 0;
+        if !found {
+            return Err(FileSystemError::TooManyFiles(MAX_FILES_STORED)); 
         }
     
-        let inode_offset = current_offset + MAX_FILENAME_BYTES;
-        dir_content_buffer[inode_offset..inode_offset + std::mem::size_of::<usize>()]
-            .copy_from_slice(&inode_num.to_le_bytes());
+    
+        let name_bytes = filename.as_bytes();
+        let mut j = 0;
+        while j < MAX_FILENAME_BYTES {
+            if j < name_bytes.len() {
+                buf[offset + j] = name_bytes[j];
+            } else {
+                buf[offset + j] = 0;
+            }
+            j += 1;
+        }
+    
+        let base = offset + MAX_FILENAME_BYTES;
+        let n = inode_num as u32;
+        buf[base] = (n & 0xFF) as u8;
+        buf[base + 1] = ((n >> 8) & 0xFF) as u8;
+        buf[base + 2] = ((n >> 16) & 0xFF) as u8;
+        buf[base + 3] = ((n >> 24) & 0xFF) as u8;
+    
 
-        let current_size = self.directory_size(directory_inode);
-        if current_size >= directory_inode.bytes_stored {
+        if (offset + entry_size) >= directory_inode.bytes_stored as usize{
             let new_block = self.request_data_block()?;
-            self.activate_bit(new_block, DATA_FULL_BLOCK);
+            self.activate_bit(new_block as usize, DATA_FULL_BLOCK as usize);
     
-            directory_inode.add_block(new_block);
+            let mut k = 0;
+            while k < MAX_FILE_BLOCKS {
+                if directory_inode.blocks[k] == 0 {
+                    directory_inode.blocks[k] = new_block;
+                    break;
+                }
+                k += 1;
+            }
+    
+            if k == MAX_FILE_BLOCKS {
+                return Err(FileSystemError::DiskFull);
+            }
+    
+            // Increase bytes_stored
+            directory_inode.bytes_stored += BLOCK_SIZE as u16;
         }
-
-        self.save_file_bytes(directory_inode)?;
-
-        self.save_inode(directory_inode.inode_number, directory_inode)?;
+    
+        self.save_file_bytes(directory_inode);
+        self.save_inode(directory_inode.blocks[0] as usize, directory_inode);
+    
     
         Ok(())
-        // Call `load_directory()` to get the directory file into the file contents buffer.
-        // Calculate the array entry in the file content buffer for the inode number.
-        // Copy the characters in the filename into the content buffer starting at that location.
-        // If there is any filename space left, fill it with zeros.
-        // Check how much space we are currently using for the directory file.
-        // * If we need more space, call `request_data_block()` to get another block.
-        // * Update the directory's inode accordingly.
-        // Call `save_file_bytes()` to save the updated directory file.
-        // Call `save_inode()` to save the updated directory inode.
     }
 
     pub fn close(&mut self, fd: usize) -> anyhow::Result<(), FileSystemError> {
@@ -601,10 +628,8 @@ impl<
         }
         let file_info = self.open[fd].take().unwrap();
     
-        if file_info.is_dirty() {
-            self.save_inode(file_info.inode_num, &file_info.inode)?;
-            self.save_file_bytes(&file_info)?;
-        }
+        self.save_inode(file_info.inode_num, &file_info.inode);
+        self.save_file_bytes(&file_info.inode); 
         self.open_inodes[file_info.inode_num] = false;
     
         Ok(())
