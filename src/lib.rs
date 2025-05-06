@@ -499,41 +499,35 @@ impl<
     }
 
     pub fn open_create(&mut self, filename: &str) -> anyhow::Result<usize, FileSystemError> {
-        if filename.len() > MAX_FILENAME_BYTES {
-            return Err(FileSystemError::FilenameTooLong(MAX_FILENAME_BYTES));
+
+        let mut dir_inode = self.directory_inode();
+
+        let inode_num = self.find_lowest_zero_bit_in(INODE_FULL_BLOCK)
+            .ok_or(FileSystemError::TooManyFiles(MAX_FILES_STORED))?;
+
+        if inode_num >= MAX_FILES_STORED {
+            return Err(FileSystemError::TooManyFiles(MAX_FILES_STORED));
         }
-        match self.inode_for(filename) {
-            Ok((inode_num, inode)) => self.open_create_reset(inode_num, inode),
-            Err(e) => match e {
-                FileSystemError::FileNotFound => self.open_create_new(filename),
-                other => Err(other),
-            },
-        }
-    }
 
-    pub fn open_create_new(&mut self, filename: &str) -> anyhow::Result<usize, FileSystemError> {
-    let directory_inode = self.directory_inode()?;
+        let first_block = self.request_data_block()?;
 
-    let inode_num = self.find_lowest_zero_bit_in(directory_inode)?;
-    if inode_num >= MAX_FILES_STORED {
-        return Err(FileSystemError::TooManyFiles);
-    }
+        let inode = self.initialize_new_file(inode_num, first_block);
 
-    let first_data_block = self.request_data_block()?;
+        self.create_directory_entry(filename, inode_num, &mut dir_inode)?;
 
-    self.create_directory_entry(filename, inode_num, first_data_block)?;
+        self.save_inode(inode_num, &dir_inode);
 
-    let fd = self.find_lowest_fd()?;
-    if fd == usize::MAX {
-        return Err(FileSystemError::TooManyOpen);
-    }
+        let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
 
-    let inode = self.load_inode(inode_num);
-    let mut file_info = FileInfo::write(inode, first_data_block);
-    file_info.clear_block_buffer(); 
-    self.open[fd] = Some(file_info);
+        let  file_info = FileInfo::write(inode, inode_num);
 
-    Ok(fd)
+        self.clear_block_buffer();
+        self.disk.write(first_block as usize, &self.block_buffer);
+
+        self.open[fd] = Some(file_info);
+        self.open_inodes[inode_num] = true;
+
+        Ok(fd)
         // Call directory_inode() to get the directory inode.
         // Pick an inode number using find_lowest_zero_bit_in on the inode block.
         // * Return TooManyFiles if none is available or if the number equals or exceeds MAX_FILES_STORED.
