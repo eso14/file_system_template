@@ -163,9 +163,9 @@ impl<
 
         self.disk.read(disk_block as usize, &mut self.block_buffer).unwrap();
 
-        for j in 0..BLOCK_SIZE {
+        for byte in self.block_buffer.iter() {
             if file_index < total_file_size {
-                self.file_content_buffer[file_index] = self.block_buffer[j as usize ];
+                self.file_content_buffer[file_index] = *byte;
                 file_index += 1;
             } else {
                 return; 
@@ -175,18 +175,21 @@ impl<
     }
 
     pub fn save_file_bytes(&mut self, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) {
+        let mut file_index: usize = 0;
         let total_file_size = inode.bytes_stored as usize;
 
-    for (block_index, &disk_block) in inode.blocks.iter().enumerate() {
+    for &disk_block in inode.blocks.iter() {
         if disk_block == 0 {
             break;
         }
 
-        let start_index = block_index * BLOCK_SIZE;
-        let end_index = min(start_index + BLOCK_SIZE, total_file_size);
-        
-        for i in start_index..end_index {
-            self.block_buffer[i - start_index] = self.file_content_buffer[i];
+        for j in 0..BLOCK_SIZE {
+            if file_index < total_file_size {
+                self.block_buffer[j] = self.file_content_buffer[file_index];
+                file_index += 1;
+            } else {
+                self.block_buffer[j] = 0; 
+            }
         }
 
         self.disk.write(disk_block as usize, &self.block_buffer).unwrap();
@@ -611,7 +614,7 @@ impl<
                 return Err(FileSystemError::DiskFull);
             }
     
-            // Increase bytes_stored
+            
             directory_inode.bytes_stored += BLOCK_SIZE as u16;
         }
     
@@ -639,13 +642,53 @@ impl<
     }
 
     pub fn read(&mut self, fd: usize, buffer: &mut [u8]) -> anyhow::Result<usize, FileSystemError> {
-        let file_info = match self.open[fd] {
-            Some(ref info) => info,
-            None => return Err(FileSystemError::FileNotOpen),
-        };
 
+        let file_info = self.open.get_mut(fd).ok_or(FileSystemError::FileNotOpen)?;
+        let file_info = file_info.as_mut().ok_or(FileSystemError::FileNotOpen)?;
+        
+        if file_info.writing {
+            return Err(FileSystemError::NotOpenForRead);
+        }
+        let file_size = file_info.inode.bytes_stored as usize;
+        if file_info.offset >= file_size {
+            return Ok(0);
+        }
 
-        Ok(())
+        let available = file_size - file_info.offset;
+        let to_read = buffer.len().min(available);
+
+        let mut bytes_read = 0;
+
+        while bytes_read < to_read {
+
+            let absolute_pos = file_info.offset;
+            let block_index = absolute_pos / BLOCK_SIZE;
+            let block_offset = absolute_pos % BLOCK_SIZE;
+   
+    
+            let block_id = file_info.inode.blocks[block_index];
+    
+            self.disk.read(block_id as usize, &mut file_info.block_buffer);
+    
+  
+            let bytes_left_in_block = BLOCK_SIZE - block_offset;
+            let bytes_left_to_copy = to_read - bytes_read;
+            let bytes_to_copy = bytes_left_in_block.min(bytes_left_to_copy);
+    
+ 
+            buffer[bytes_read..bytes_read + bytes_to_copy]
+                .copy_from_slice(&file_info.block_buffer[block_offset..block_offset + bytes_to_copy]);
+
+            bytes_read += bytes_to_copy;
+            file_info.offset += bytes_to_copy; 
+    
+ 
+            if bytes_read < to_read {
+                file_info.current_block += 1; 
+            }
+        }
+
+        Ok(bytes_read)
     
         
         // Use the `open` table entry to determine how much of the file we have read.
@@ -660,10 +703,51 @@ impl<
     }
 
     pub fn write(&mut self, fd: usize, buffer: &[u8]) -> anyhow::Result<(), FileSystemError> {
-        let file_info = match self.open[fd] {
-            Some(ref info) => info,
-            None => return Err(FileSystemError::FileNotOpen),
-        };
+        let file_info = self.open.get_mut(fd).ok_or(FileSystemError::FileNotOpen)?;
+        let file_info = file_info.as_mut().ok_or(FileSystemError::FileNotOpen)?;
+
+        if !file_info.writing {
+            return Err(FileSystemError::NotOpenForWrite);
+        }
+
+        let mut buffer_offset = 0;
+
+    while buffer_offset < buffer.len() {
+    
+        let space_left_in_buffer = BLOCK_SIZE - file_info.offset % BLOCK_SIZE;
+        let bytes_to_write = buffer.len() - buffer_offset;
+        let bytes_to_copy = bytes_to_write.min(space_left_in_buffer);
+
+       
+        file_info.block_buffer[file_info.offset % BLOCK_SIZE..file_info.offset % BLOCK_SIZE + bytes_to_copy]
+            .copy_from_slice(&buffer[buffer_offset..buffer_offset + bytes_to_copy]);
+
+        file_info.offset += bytes_to_copy;
+        buffer_offset += bytes_to_copy;
+
+   
+        if file_info.offset % BLOCK_SIZE == 0 {
+        
+            self.disk.write(file_info.inode.blocks[file_info.current_block] as usize, &file_info.block_buffer);
+
+            if file_info.inode.bytes_stored as usize + BLOCK_SIZE > MAX_FILE_BYTES {
+                return Err(FileSystemError::FileTooBig(MAX_FILE_BYTES));
+            }
+
+            if file_info.current_block < MAX_FILE_BLOCKS - 1 {
+                file_info.current_block += 1;
+                file_info.inode.blocks[file_info.current_block] = file_info.current_block as u8; 
+            }
+        }
+    }
+
+    if file_info.offset % BLOCK_SIZE != 0 {
+        self.disk.write(file_info.inode.blocks[file_info.current_block] as usize, &file_info.block_buffer);
+    }
+
+
+    file_info.inode.bytes_stored = (file_info.offset % MAX_FILE_BYTES) as u16;
+
     
         
     
@@ -685,9 +769,27 @@ impl<
         inode_num: usize,
         mut inode: Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>,
     ) -> anyhow::Result<usize, FileSystemError> {
+        let mut block_buffer = [0u8; BLOCK_SIZE];
+        for i in 0..MAX_FILE_BLOCKS {
+            let block_id = inode.blocks[i];
+            self.disk.read(block_id as usize, &mut block_buffer);
+
+            block_buffer.fill(0);
+
+            self.disk.write(block_id as usize, &block_buffer);
+        }
+
+        inode.bytes_stored = 0; 
+        inode.blocks.fill(0);
+
+        self.save_inode(inode_num, &inode);
+
+        let fd = ;
+
+
         
     
-        Ok()
+        Ok(fd)
         // Load the DATA_FULL_BLOCK into the block buffer.
         // Clear all of the currently-used blocks for this file in the DATA_FULL_BLOCK.
         // Write that block back to disk.
@@ -698,13 +800,33 @@ impl<
     }
 
     pub fn open_append(&mut self, filename: &str) -> anyhow::Result<usize, FileSystemError> {
+    let (inode_num, inode) = self.inode_for(filename)?;
+
+    let fd = self.open.iter().position(|entry| entry.is_none())
+        .ok_or(FileSystemError::TooManyOpenFiles);
+
+
+    let bytes = inode.bytes_stored as usize;
+    let current_block = bytes / BLOCK_SIZE;
+    let offset = bytes % BLOCK_SIZE;
+
+    let mut file_info = FileInfo::write_inside(inode, inode_num, current_block, offset);
 
     
+    if current_block < MAX_FILE_BLOCKS && current_block < file_info.inode.blocks.len() {
+        let block_num = file_info.inode.blocks[current_block] as usize;
+        self.disk.read(block_num, &mut file_info.block_buffer);
+    }
 
+  
     self.open[fd] = Some(file_info);
     self.open_inodes[inode_num] = true;
 
     Ok(fd)
+    
+    
+
+
         // Call `inode_for()` to get the file's inode.
         // Pick a file descriptor to use for the file.
         // Call FileInfo::write_inside() to create a FileInfo object for the `open` table.
@@ -776,9 +898,9 @@ impl<const MAX_BLOCKS: usize, const BLOCK_SIZE: usize> Inode<MAX_BLOCKS, BLOCK_S
     }
 
     pub fn from_bytes(buffer: &[u8]) -> Self {
-        let low_order = buffer[0];
-        let high_order = buffer[1];
-        let bytes_stored = (high_order as usize) << 8 | (low_order as usize);
+        let low_order = buffer[0] as u16;
+        let high_order = buffer[1]as u16;
+        let bytes_stored = (high_order as u16) << 8 | (low_order as u16);
         let mut blocks = [0; MAX_BLOCKS]; 
     for i in 0..MAX_BLOCKS {
         blocks[i] = buffer[2 + i]; 
