@@ -152,7 +152,7 @@ impl<
         self.block_buffer[0] != 0
     }
 
-    pub fn load_file_bytes(&mut self, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) {
+    pub fn load_file_bytes(&mut self, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) -> &mut [u8] {
     let mut file_index:usize = 0;
     let total_file_size = inode.bytes_stored as usize;
 
@@ -168,10 +168,11 @@ impl<
                 self.file_content_buffer[file_index] = *byte;
                 file_index += 1;
             } else {
-                return; 
+                break; 
             }
         }
     }
+    &mut self.file_content_buffer[..total_file_size]
     }
 
     pub fn save_file_bytes(&mut self, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) {
@@ -241,7 +242,7 @@ impl<
     }
 
     pub fn inode_table_inode(&mut self) -> Inode<MAX_FILE_BLOCKS, BLOCK_SIZE> {
-        let num_entries = self.num_inode_entries();
+        let num_entries = self.num_inode_entries().clone();
 
 
     let mut inode = Inode::<MAX_FILE_BLOCKS, BLOCK_SIZE> {
@@ -269,9 +270,10 @@ impl<
     }
 
     fn save_inode(&mut self, inode_num: usize, inode: &Inode<MAX_FILE_BLOCKS, BLOCK_SIZE>) {
-     let inode_table = self.inode_table_inode();
-    self.load_file_bytes(&inode_table);
-    self.update_inode_table(inode_num, inode);
+        let offset = inode_num * self.num_inode_bytes();       
+        let inode_table = self.inode_table_inode();              
+        let mut table_buffer = self.load_file_bytes(&inode_table);
+    inode.update_inode_table(offset, &mut table_buffer);
     self.save_file_bytes(&inode_table);
     }
 
@@ -784,7 +786,11 @@ impl<
 
         self.save_inode(inode_num, &inode);
 
-        let fd = ;
+        let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
+        let  file_info = FileInfo::write(inode, inode_num);
+
+        self.open[fd] = Some(file_info);
+        self.open_inodes[inode_num] = true;
 
 
         
@@ -802,9 +808,7 @@ impl<
     pub fn open_append(&mut self, filename: &str) -> anyhow::Result<usize, FileSystemError> {
     let (inode_num, inode) = self.inode_for(filename)?;
 
-    let fd = self.open.iter().position(|entry| entry.is_none())
-        .ok_or(FileSystemError::TooManyOpenFiles);
-
+    let fd = self.find_lowest_fd().ok_or(FileSystemError::TooManyOpen(MAX_OPEN))?;
 
     let bytes = inode.bytes_stored as usize;
     let current_block = bytes / BLOCK_SIZE;
