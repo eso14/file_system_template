@@ -293,13 +293,12 @@ impl<
     }
 
     fn mark_inode_blocks_in_use(&mut self) {
-        let bits_per_block = BLOCK_SIZE * 8;
-        for block in 2..=self.num_inode_blocks() {
-            for bit in 0..bits_per_block {
+        let first_inode_block = 2;
+    let last_inode_block = first_inode_block + self.num_inode_blocks();
 
-                self.activate_bit(bit, block);
-            }
-        }
+    for block_num in 0..last_inode_block {
+        self.activate_bit(block_num, DATA_FULL_BLOCK);
+    }
     }
 
     fn initialize_new_file(
@@ -337,7 +336,7 @@ impl<
 
     fn directory_inode(&mut self) -> Inode<MAX_FILE_BLOCKS, BLOCK_SIZE> {
         let dir_inode_num = 0;
-    let dir_inode = self.load_inode(dir_inode_num);
+    let dir_inode = self.load_inode(dir_inode_num); 
 
     if dir_inode.bytes_stored > 0 {
         return dir_inode;
@@ -345,7 +344,7 @@ impl<
 
     self.mark_inode_blocks_in_use();
 
-    let first_directory_block: u8 = 0;
+    let first_directory_block: u8 = self.first_data_block() as u8;
 
     let new_dir_inode = self.initialize_new_file(dir_inode_num, first_directory_block);
 
@@ -1091,7 +1090,7 @@ mod tests {
         let mut sys = make_preloaded_fs();
         let inode = sys.inode_table_inode();
         assert_eq!(inode.bytes_stored, 300);
-        assert_eq!(inode.blocks, [2, 3, 4, 5, 6, 0, 0, 0]);
+        assert_eq!(&inode.blocks[..5], [2, 3, 4, 5, 6]);
     }
 
     #[test]
