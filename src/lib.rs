@@ -602,21 +602,16 @@ impl<
             let new_block = self.request_data_block()?;
             self.activate_bit(new_block as usize, DATA_FULL_BLOCK as usize);
     
-            let mut k = 0;
-            while k < MAX_FILE_BLOCKS {
-                if directory_inode.blocks[k] == 0 {
-                    directory_inode.blocks[k] = new_block;
-                    break;
-                }
-                k += 1;
-            }
-    
-            if k == MAX_FILE_BLOCKS {
-                return Err(FileSystemError::DiskFull);
-            }
-    
-            
+            let blocks_used = (directory_inode.bytes_stored as usize + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+                if blocks_used >= MAX_FILE_BLOCKS {
+                    return Err(FileSystemError::DiskFull);
+                    }
+
+            directory_inode.blocks[blocks_used] = new_block;
             directory_inode.bytes_stored += BLOCK_SIZE as u16;
+    
+        
         }
     
         self.save_file_bytes(directory_inode);
