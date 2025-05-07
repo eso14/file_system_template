@@ -293,7 +293,7 @@ impl<
     }
 
     fn mark_inode_blocks_in_use(&mut self) {
-        let first_inode_block = 2;
+        let first_inode_block = INODE_TABLE_START;
     let last_inode_block = first_inode_block + self.num_inode_blocks();
 
     for block_num in 0..last_inode_block {
